@@ -15,8 +15,8 @@ sed "s|/Users/REPLACE_ME|$HOME|g" "$PLIST_SRC" > "$PLIST_DST"
 launchctl unload "$PLIST_DST" 2>/dev/null || true
 launchctl load "$PLIST_DST"
 sleep 1
-status=$(launchctl list | grep com.cardinal.daemon || true)
-echo "Установлен и запущен: $status"
+label=$(launchctl list | grep com.cardinal.daemon || true)
+echo "Установлен и запущен: $label"
 echo "Лог: /tmp/cardinald.log"
 echo ""
 echo "Убрать: launchctl unload $PLIST_DST && rm $PLIST_DST"
