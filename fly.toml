@@ -1,0 +1,16 @@
+# Деплой: flyctl deploy --remote-only
+# Секреты: flyctl secrets set RELAY_TOKEN=... TELEGRAM_BOT_TOKEN=...
+app = "cardinal-relay-3037d2"
+primary_region = "ams"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    path = "/health"
+    interval = "30s"
+    timeout = "5s"

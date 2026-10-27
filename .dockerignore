@@ -1,0 +1,11 @@
+.git
+.gitignore
+dist/
+test/
+*.local.json
+.env
+config.json
+cardinald
+relayd
+fly.toml
+README.md

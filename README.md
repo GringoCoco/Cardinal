@@ -91,11 +91,30 @@ Claude Code ──hook──► cardinal-hook ──POST──► cardinald (:97
 
 - [x] **Фаза 0** — хуки → Telegram-пуш, Allow/Deny из кнопок бота
 - [ ] **Фаза 1** — свой relay (Go + WebSocket): Mini App с живым статусом сессий
+  - [x] skeleton relayd: WS-hub, initData, регистрация/привязка
+  - [x] `cardinald connect` + WS-клиент relay в daemon'е (reconnect, 401→re-register)
 - [ ] **Фаза 2** — Telegram Mini App (Preact): промпты агентам прямо из телефона
   (`claude -p --resume`, `codex resume`)
 - [ ] **Фаза 3** — история буфера обмена Mac в Mini App (по запросу)
 - [ ] **Фаза 4** — menu-bar/notch приложение на Swift: сгусток энергии в вырезе,
   статус агентов, быстрые действия
+
+## Развёртывание relay (Fly.io)
+
+```bash
+brew install flyctl && flyctl auth login
+flyctl apps create            # имя возьмёт из fly.toml
+flyctl secrets set RELAY_TOKEN="$(openssl rand -hex 24)" \
+                   TELEGRAM_BOT_TOKEN="$(jq -r .bot_token ~/.config/cardinal/config.json)"
+flyctl deploy --remote-only
+
+# на Mac: подключить daemon к relay
+cardinald connect https://<имя-приложения>.fly.dev -token <RELAY_TOKEN>
+cardinald run
+```
+
+Секреты в репо не попадают: конфиг daemon'а — локальный файл 0600,
+секреты relay живут в `flyctl secrets`.
 
 ## Лицензия
 
