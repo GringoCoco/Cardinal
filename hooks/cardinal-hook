@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+"""cardinal-hook — relay Cardinal для хуков агентов (Claude Code и других).
+
+Читает hook-JSON на stdin, шлёт POST на локальный daemon
+(http://127.0.0.1:<port>/hook), печатает ответ.
+
+Правила (как в MauMau):
+  * daemon недоступен → exit 0 без вывода, агент продолжит как без нас
+  * PermissionRequest ждёт решения ≤ CARDINAL_TIMEOUT (по умолчанию 115 с)
+  * любой сбой — тихий, агент не должен страдать
+"""
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+DAEMON = os.environ.get("CARDINAL_DAEMON", "http://127.0.0.1:9723") + "/hook"
+TIMEOUT = int(os.environ.get("CARDINAL_TIMEOUT", "115"))
+
+
+def main() -> int:
+    raw = sys.stdin.read()
+    if not raw.strip():
+        return 0
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return 0  # не сериализуемая ошибка дробит агент — молча выходим
+
+    # PermissionRequest пересылается как есть (daemon сам решает, сколько ждать)
+    req = urllib.request.Request(
+        DAEMON,
+        data=raw.encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            output = resp.read()
+    except urllib.error.URLError:
+        return 0  # daemon выключен — агент спрашивает в терминале, как обычно
+    except Exception:
+        return 0
+
+    if output.strip():
+        sys.stdout.write(output.decode())
+        sys.stdout.flush()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

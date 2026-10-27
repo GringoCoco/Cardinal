@@ -1,0 +1,13 @@
+# бинари
+cardinald
+cardinald.exe
+/dist/
+
+# тесты и мусор
+*.test
+*.out
+/tmp/
+
+# локальные конфиги (никогда не коммитим токены)
+*.local.json
+.env
