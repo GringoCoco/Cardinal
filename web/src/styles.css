@@ -223,4 +223,11 @@ textarea, input {
 
 .loading { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: var(--bg); color: var(--hint); }
 
+.session { position: relative; }
+.session.live { border-color: rgba(46, 166, 255, 0.55); background: linear-gradient(180deg, rgba(46, 166, 255, 0.07), rgba(124, 92, 255, 0.06)); }
+.session.live .eicon { color: var(--accent); }
+.eicon { color: var(--hint); font-weight: 800; }
+.running { margin-top: 10px; color: var(--accent); font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+.running::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 10px var(--accent); animation: pulse 1.4s ease-in-out infinite; }
+
 @media (prefers-reduced-motion: reduce) { .glow { animation: none; } }
