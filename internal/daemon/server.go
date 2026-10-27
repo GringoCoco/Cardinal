@@ -45,12 +45,13 @@ type PendingPerm struct {
 }
 
 type Daemon struct {
-	cfg     *config.Config
-	tg      *tg.Client
-	relay   *RelayClient
-	mu      sync.Mutex
-	pending map[string]*PendingPerm
-	httpSrv *http.Server
+	cfg         *config.Config
+	tg          *tg.Client
+	relay       *RelayClient
+	mu          sync.Mutex
+	pending     map[string]*PendingPerm
+	lastByAgent map[string]lastInfo
+	httpSrv     *http.Server
 }
 
 func New(cfg *config.Config) *Daemon {
@@ -127,6 +128,8 @@ func (d *Daemon) handleHook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("hook: %s %s · %s", hook.NamedAgent(), hook.Canonical(), hook.Project())
+
+	d.remember(agentKeyOf(&hook), hook.CWD, hook.SessionID)
 
 	// Правило MauMau. Ожидание — только для PermissionRequest,
 	// остальное отвечаем пустым JSON немедленно.
@@ -392,6 +395,14 @@ func (d *Daemon) handleUpdate(u tg.Update) {
 	default:
 	}
 	_ = d.tg.AnswerCallback(cb.ID, word+" · "+p.Agent)
+	state := "deny"
+	if dec == events.DecisionAllow {
+		state = "allow"
+	}
+	// Mini App тоже должен увидеть, что решение принято из Telegram
+	d.relay.SendStatus(relay.TypePermResolved, map[string]string{
+		"id": p.ID, "decision": state, "agent": p.Agent, "summary": p.Summary,
+	})
 }
 
 func writeJSON(w http.ResponseWriter, b []byte) {

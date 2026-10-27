@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -189,6 +190,16 @@ func (c *RelayClient) handleAppEnvelope(env relay.Envelope) {
 		}
 		c.d.resolvePermByID(body.ID, body.Decision == "allow")
 
+	case relay.TypePrompt:
+		var body struct {
+			Agent string `json:"agent"`
+			Text  string `json:"text"`
+		}
+		if json.Unmarshal(env.Body, &body) != nil || body.Agent == "" || body.Text == "" {
+			return
+		}
+		c.d.spawnAgentPrompt(body.Agent, body.Text)
+
 	case relay.TypeNotify:
 		var body struct {
 			Text string `json:"text"`
@@ -200,6 +211,106 @@ func (c *RelayClient) handleAppEnvelope(env relay.Envelope) {
 			c.d.tg.Send(c.d.cfg.ChatID, "📱 "+body.Text, false, nil)
 		}
 	}
+}
+
+// lastInfo — где агент последний раз работал (для промптов из Mini App).
+type lastInfo struct {
+	CWD       string
+	SessionID string
+}
+
+// agentKeyOf — ключ агента, как его знает Mini App: claude / opencode / codex.
+func agentKeyOf(h *events.Hook) string {
+	a := strings.ToLower(strings.TrimSpace(h.Agent))
+	if a == "" || a == "claude code" {
+		return "claude"
+	}
+	return strings.SplitN(a, " ", 2)[0]
+}
+
+// remember — фиксируем cwd/сессию агента при каждом его событии.
+func (d *Daemon) remember(agent, cwd, sessionID string) {
+	if cwd == "" && sessionID == "" {
+		return
+	}
+	d.mu.Lock()
+	if d.lastByAgent == nil {
+		d.lastByAgent = map[string]lastInfo{}
+	}
+	prev := d.lastByAgent[agent]
+	if cwd == "" {
+		cwd = prev.CWD
+	}
+	if sessionID == "" {
+		sessionID = prev.SessionID
+	}
+	d.lastByAgent[agent] = lastInfo{CWD: cwd, SessionID: sessionID}
+	d.mu.Unlock()
+}
+
+// agentCommands — как запускать промпт для каждого агента.
+// resume, если известна последняя сессия.
+func agentCommands(agent, text, sessionID string) ([]string, bool) {
+	switch agent {
+	case "claude":
+		args := []string{"claude", "-p"}
+		if sessionID != "" {
+			args = append(args, "--resume", sessionID)
+		}
+		return append(args, text), true
+	case "opencode":
+		args := []string{"opencode", "run", "--standalone"}
+		if sessionID != "" {
+			args = append(args, "--session", sessionID)
+		}
+		return append(args, text), true
+	case "codex":
+		args := []string{"codex", "exec"}
+		if sessionID != "" {
+			args = append(args, "resume", "--last")
+		}
+		return append(args, text), true
+	}
+	return nil, false
+}
+
+// spawnAgentPrompt — Mini App попросил агента поработать: запускаем его CLI
+// в его последней рабочей папке. Дальше события придут его же хуками.
+func (d *Daemon) spawnAgentPrompt(agent, text string) {
+	d.mu.Lock()
+	last := d.lastByAgent[agent]
+	d.mu.Unlock()
+	if last.CWD == "" {
+		d.relay.SendStatus("prompt.rejected", map[string]string{
+			"agent": agent, "reason": "агент ещё ничего не делал на этом Mac — не знаю его рабочую папку",
+		})
+		return
+	}
+	args, ok := agentCommands(agent, text, last.SessionID)
+	if !ok {
+		d.relay.SendStatus("prompt.rejected", map[string]string{"agent": agent, "reason": "неизвестный агент"})
+		return
+	}
+
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Dir = last.CWD
+	logFile := fmt.Sprintf("/tmp/cardinal-%s-%d.log", agent, time.Now().Unix())
+	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err == nil {
+		cmd.Stdout, cmd.Stderr = f, f
+	}
+	if err := cmd.Start(); err != nil {
+		d.relay.SendStatus("prompt.rejected", map[string]string{"agent": agent, "reason": err.Error()})
+		return
+	}
+	go func() {
+		_ = f.Close()
+		_ = cmd.Wait()
+	}()
+	log.Printf("prompt: %s в %s (лог %s)", agent, last.CWD, logFile)
+	d.relay.SendStatus("prompt.accepted", map[string]string{
+		"agent": agent, "cwd": last.CWD, "log": logFile,
+	})
 }
 
 // reRegister — relay потерял нас (перезапуск, всё в памяти): новый device_token.
@@ -311,6 +422,6 @@ func (d *Daemon) resolvePermByID(id string, allow bool) {
 		state = "allow"
 	}
 	d.relay.SendStatus(relay.TypePermResolved, map[string]string{
-		"id": id, "decision": state,
+		"id": id, "decision": state, "agent": p.Agent, "summary": p.Summary,
 	})
 }

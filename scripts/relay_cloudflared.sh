@@ -22,6 +22,7 @@ RELAY_TOKEN="${CARDINAL_RELAY_TOKEN:-$(/usr/bin/openssl rand -hex 24)}"
 
 echo "→ поднимаю relayd на 127.0.0.1:$PORT"
 RELAY_TOKEN="$RELAY_TOKEN" TELEGRAM_BOT_TOKEN="$BOT_TOKEN" \
+  CARDINAL_RELAY_STATIC="$(cd "$(dirname "$0")/.." && pwd)/web/dist" \
   relayd -listen "127.0.0.1:$PORT" &
 relay_pid=$!
 cf_pid=""

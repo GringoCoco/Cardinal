@@ -285,8 +285,37 @@ func cmdConnect(args []string) error {
 		return err
 	}
 	fmt.Printf("✅ Устройство %s зарегистрировано в %s\n", did, cfg.RelayURL)
+	// Код пары для Mini App (годен 10 минут, но можно выпустить снова).
+	if code, err := pairCode(ctx, base, tok); err == nil {
+		fmt.Printf("   Код пары для Mini App: %s\n", code)
+	}
 	fmt.Println("   Перезапусти «cardinald run» — подключится к relay по WS.")
 	return nil
+}
+
+// pairCode — POST /api/pair-code (Bearer device_token).
+func pairCode(ctx context.Context, base *url.URL, deviceToken string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		base.Scheme+"://"+base.Host+"/api/pair-code", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+deviceToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	var out struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || out.Code == "" {
+		return "", fmt.Errorf("кривой ответ")
+	}
+	return out.Code, nil
 }
 
 // registerRelayDevice — POST /api/register у relay.

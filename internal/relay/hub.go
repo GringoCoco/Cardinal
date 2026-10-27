@@ -42,6 +42,7 @@ const (
 
 	// app → device
 	TypePermResolve = "permission.resolve" // Mini App решает карточку
+	TypePrompt      = "prompt"             // Mini App шлёт промпт агенту (daemon запускает CLI)
 	TypeNotify      = "notify"             // Mini App просит продублировать текст в Telegram
 )
 

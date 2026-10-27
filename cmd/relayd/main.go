@@ -46,7 +46,7 @@ type Server struct {
 func main() {
 	log.SetFlags(log.Ltime)
 	listen := flag.String("listen", envOr("CARDINAL_RELAY_LISTEN", ":8080"), "адрес HTTP")
-	static := flag.String("static", "./web/dist", "каталог статики Mini App")
+	static := flag.String("static", envOr("CARDINAL_RELAY_STATIC", "./web/dist"), "каталог статики Mini App")
 	flag.Parse()
 
 	relayTok := os.Getenv("RELAY_TOKEN")
@@ -140,12 +140,20 @@ func (s *Server) handlePairCode(w http.ResponseWriter, r *http.Request) {
 
 // ── Mini App: авторизация initData ────────────────────────────────────
 
+// authInitData — initData из заголовка Authorization или query (?init_data=).
 func (s *Server) authInitData(w http.ResponseWriter, r *http.Request) *relay.InitData {
 	if s.botToken == "" {
 		http.Error(w, "relay не знает токен бота", http.StatusServiceUnavailable)
 		return nil
 	}
 	raw := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if raw == "" {
+		raw = r.URL.Query().Get("init_data")
+	}
+	if raw == "" {
+		http.Error(w, "нет initData", http.StatusUnauthorized)
+		return nil
+	}
 	id, err := relay.ValidateInitData(s.botToken, raw, initDataMaxAge)
 	if err != nil {
 		http.Error(w, "initData: "+err.Error(), http.StatusUnauthorized)
@@ -235,6 +243,7 @@ func (s *Server) handleDeviceWS(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAppWS(w http.ResponseWriter, r *http.Request) {
+	// Браузерный WebSocket не умеет заголовки — initData также в query.
 	id := s.authInitData(w, r)
 	if id == nil {
 		return

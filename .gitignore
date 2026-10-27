@@ -12,3 +12,6 @@
 *.local.json
 .env
 test/
+
+# node
+node_modules/
