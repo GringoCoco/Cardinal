@@ -28,6 +28,11 @@ type Config struct {
 
 	// Дополнительные чаты, которым разрешено отвечать (Allow/Deny). Пусто = только владелец.
 	ExtraChats []int64 `json:"extra_chats,omitempty"`
+
+	// Relay (фаза 1): WS-концентратор для Mini App. Заполняет cardinald connect.
+	RelayURL    string `json:"relay_url,omitempty"`    // базовый URL, например https://cardinal-relay.fly.dev
+	RelayToken  string `json:"relay_token,omitempty"`  // общий секрет RELAY_TOKEN (для повторной регистрации)
+	DeviceToken string `json:"device_token,omitempty"` // персональный токен WS /ws/device
 }
 
 // Dir — каталог конфига. Переопределяется CARDINAL_HOME.

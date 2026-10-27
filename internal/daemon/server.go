@@ -16,6 +16,7 @@ import (
 
 	"github.com/GringoCoco/cardinal/internal/config"
 	"github.com/GringoCoco/cardinal/internal/events"
+	"github.com/GringoCoco/cardinal/internal/relay"
 	"github.com/GringoCoco/cardinal/internal/tg"
 )
 
@@ -46,6 +47,7 @@ type PendingPerm struct {
 type Daemon struct {
 	cfg     *config.Config
 	tg      *tg.Client
+	relay   *RelayClient
 	mu      sync.Mutex
 	pending map[string]*PendingPerm
 	httpSrv *http.Server
@@ -81,6 +83,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	if d.cfg.ChatID != 0 {
 		go d.pollLoop(ctx)
+	}
+	if rc := newRelayClient(d); rc != nil {
+		d.relay = rc
+		go rc.Run(ctx)
+		log.Printf("relay: запускаю WS-клиент → %s", d.cfg.RelayURL)
 	}
 
 	log.Printf("cardinald: хуки по http://%s/hook", addr)
@@ -136,6 +143,29 @@ func (d *Daemon) handleHook(w http.ResponseWriter, r *http.Request) {
 // ни текста промпта, ни команды — только агент и состояние
 // (приватность как у MauMau: push сообщает, детали смотришь на опции).
 func (d *Daemon) dispatch(h *events.Hook) {
+	state := ""
+	switch h.Canonical() {
+	case events.Stop:
+		state = "ok"
+	case events.StopFailure:
+		state = "error"
+	case events.StopInterrupted:
+		state = "interrupted"
+	}
+	// Сначала релей (Mini App видит статусы даже без chat_id), потом пуш.
+	switch state {
+	case "":
+	default:
+		d.relay.SendStatus(relay.TypeSessionFinished, map[string]string{
+			"agent": h.NamedAgent(), "state": state, "project": h.Project(),
+		})
+	}
+	if h.Canonical() == events.SessionStart {
+		d.relay.SendStatus(relay.TypeSessionStatus, map[string]string{
+			"agent": h.NamedAgent(), "state": "started", "project": h.Project(),
+		})
+	}
+
 	if d.cfg.ChatID == 0 {
 		return
 	}
@@ -227,9 +257,23 @@ func (d *Daemon) handlePermission(w http.ResponseWriter, h *events.Hook) {
 		return
 	}
 
+	// Релей: карточка появляется и в Mini App (в снапшоте — тоже).
+	d.relay.SendStatus(relay.TypePermRequest, map[string]string{
+		"id": p.ID, "agent": p.Agent, "summary": p.Summary, "project": p.Project,
+	})
+
 	select {
 	case dec := <-p.Decision:
 		writeJSON(w, decisionJSON(dec))
+		if dec != events.DecisionNone {
+			state := "deny"
+			if dec == events.DecisionAllow {
+				state = "allow"
+			}
+			d.relay.SendStatus(relay.TypePermResolved, map[string]string{
+				"id": p.ID, "decision": state,
+			})
+		}
 	case <-time.After(DecisionWaitOf(d.cfg)):
 		if msgID > 0 {
 			_ = d.tg.EditMarkup(d.cfg.ChatID, msgID, nil)

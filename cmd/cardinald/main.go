@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -27,6 +28,7 @@ const usage = `cardinald — daemon Cardinal (https://github.com/GringoCoco/Card
 Команды:
   cardinald pair        привязать бота: спрашивает токен, потом код из твоего чата
   cardinald run         запустить daemon (хуки :9723 + пуши в Telegram)
+  cardinald connect URL подключить daemon к relay (Mini App): регистрирует устройство
   cardinald testevent   отправить тестовое уведомление в Telegram
   cardinald testperm    тест карточки разрешения: жми кнопку — увидишь решение здесь
   cardinald version     версия
@@ -48,6 +50,8 @@ func main() {
 		err = cmdTestEvent()
 	case "testperm":
 		err = cmdTestPerm()
+	case "connect":
+		err = cmdConnect(os.Args[2:])
 	case "version":
 		fmt.Println("cardinald 0.1.0 (фаза 0: хуки → Telegram)")
 	case "-h", "--help", "help":
@@ -78,8 +82,11 @@ func cmdRun() error {
 	if err != nil {
 		return err
 	}
+	if cfg.BotToken == "" && cfg.RelayURL == "" {
+		return fmt.Errorf("ничего не настроено — сначала запусти «cardinald pair» (и, при желании, «cardinald connect URL»)")
+	}
 	if cfg.BotToken == "" {
-		return fmt.Errorf("нет bot_token — сначала запусти «cardinald pair»")
+		log.Printf("bot_token пуст — Telegram-пуши выключены, работаю только по relay")
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -221,4 +228,94 @@ func cmdTestPerm() error {
 		fmt.Printf("⌛ Решения не пришло (таймаут %d с). Ответ daemon: %s\n", wait, string(raw))
 	}
 	return nil
+}
+
+// cmdConnect — регистрация устройства в relay и настройка конфига.
+// После неё «cardinald run» держит WS к relay: Mini App видит статусы,
+// решает карточки разрешений и шлёт промпты (фаза 2).
+func cmdConnect(args []string) error {
+	cfg, err := loadCfg()
+	if err != nil {
+		return err
+	}
+	if len(args) < 1 || args[0] == "" {
+		return fmt.Errorf("укажи адрес relay: cardinald connect https://cardinal-relay.fly.dev")
+	}
+	rawURL := args[0]
+	if !strings.Contains(rawURL, "://") {
+		rawURL = "https://" + rawURL
+	}
+	base, err := url.Parse(strings.TrimRight(rawURL, "/"))
+	if err != nil || base.Host == "" {
+		return fmt.Errorf("кривой URL: %s", rawURL)
+	}
+
+	// RELAY_TOKEN: флаг -token, окружение или ввод с терминала.
+	relayToken := ""
+	rest := args[1:]
+	for i := 0; i < len(rest); i++ {
+		if rest[i] == "-token" || rest[i] == "--token" {
+			if i+1 < len(rest) {
+				relayToken = rest[i+1]
+				i++
+			}
+		}
+	}
+	if relayToken == "" {
+		relayToken = os.Getenv("CARDINAL_RELAY_TOKEN")
+	}
+	if relayToken == "" {
+		fmt.Print("RELAY_TOKEN (общий секрет relay): ")
+		if _, err := fmt.Scanln(&relayToken); err != nil {
+			return fmt.Errorf("не считал RELAY_TOKEN: %w", err)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	tok, did, err := registerRelayDevice(ctx, base, relayToken)
+	if err != nil {
+		return err
+	}
+
+	cfg.RelayURL = base.Scheme + "://" + base.Host
+	cfg.RelayToken = relayToken
+	cfg.DeviceToken = tok
+	if err := cfg.Save(); err != nil {
+		return err
+	}
+	fmt.Printf("✅ Устройство %s зарегистрировано в %s\n", did, cfg.RelayURL)
+	fmt.Println("   Перезапусти «cardinald run» — подключится к relay по WS.")
+	return nil
+}
+
+// registerRelayDevice — POST /api/register у relay.
+func registerRelayDevice(ctx context.Context, base *url.URL, relayToken string) (string, string, error) {
+	did := daemon.DeviceID()
+	body, _ := json.Marshal(map[string]string{"device_id": did, "name": did})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		base.Scheme+"://"+base.Host+"/api/register", strings.NewReader(string(body)))
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+relayToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", "", fmt.Errorf("relay недоступен: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		return "", "", fmt.Errorf("RELAY_TOKEN отклонён (HTTP 401)")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("register: HTTP %d", resp.StatusCode)
+	}
+	var out struct {
+		DeviceToken string `json:"device_token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || out.DeviceToken == "" {
+		return "", "", fmt.Errorf("register: кривой ответ relay")
+	}
+	return out.DeviceToken, did, nil
 }
