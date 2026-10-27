@@ -23,6 +23,14 @@ import (
 // (как в MauMau: 110 с). Дальше пустой ответ — агент спросит в терминале.
 const DecisionWait = 110 * time.Second
 
+// DecisionWaitOf — бюджет ожидания из конфига.
+func DecisionWaitOf(cfg *config.Config) time.Duration {
+	if cfg != nil && cfg.DecisionWaitSec > 0 {
+		return time.Duration(cfg.DecisionWaitSec) * time.Second
+	}
+	return DecisionWait
+}
+
 // PendingPerm — запрос разрешения, ждущий решения из Telegram.
 type PendingPerm struct {
 	ID       string
@@ -110,6 +118,7 @@ func (d *Daemon) handleHook(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, []byte("{}"))
 		return
 	}
+	log.Printf("hook: %s %s · %s", hook.NamedAgent(), hook.Canonical(), hook.Project())
 
 	// Правило MauMau. Ожидание — только для PermissionRequest,
 	// остальное отвечаем пустым JSON немедленно.
@@ -134,6 +143,8 @@ func (d *Daemon) dispatch(h *events.Hook) {
 		d.send(h.NamedAgent()+" 🟢 готово", h, false, nil, nil)
 	case events.StopFailure:
 		d.send(h.NamedAgent()+" 🔴 ошибка", h, false, nil, nil)
+	case events.StopInterrupted:
+		d.send(h.NamedAgent()+" ⏹ остановлено", h, false, nil, nil)
 	case events.Notification:
 		msg := h.Message
 		if msg == "" {
@@ -187,7 +198,7 @@ func (d *Daemon) handlePermission(w http.ResponseWriter, h *events.Hook) {
 	select {
 	case dec := <-p.Decision:
 		writeJSON(w, decisionJSON(dec))
-	case <-time.After(DecisionWait):
+	case <-time.After(DecisionWaitOf(d.cfg)):
 		if msgID > 0 {
 			_ = d.tg.EditMarkup(d.cfg.ChatID, msgID, nil)
 		}

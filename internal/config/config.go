@@ -23,6 +23,9 @@ type Config struct {
 	Port     int  `json:"port"`      // HTTP-порт хуков (0 = DefaultPort)
 	ShowText bool `json:"show_text"` // показывать текст промптов/команд в пуше (по умолчанию нет — приватность)
 
+	// Сколько секунд ждём кнопку Allow/Deny из Telegram (0 = 110, как в MauMau).
+	DecisionWaitSec int `json:"decision_wait"`
+
 	// Дополнительные чаты, которым разрешено отвечать (Allow/Deny). Пусто = только владелец.
 	ExtraChats []int64 `json:"extra_chats,omitempty"`
 }

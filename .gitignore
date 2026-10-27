@@ -11,3 +11,4 @@ cardinald.exe
 # локальные конфиги (никогда не коммитим токены)
 *.local.json
 .env
+test/

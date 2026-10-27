@@ -18,6 +18,7 @@ const (
 	SessionEnd       = "SessionEnd"
 	SubagentStart    = "SubagentStart"
 	SubagentStop     = "SubagentStop"
+	StopInterrupted  = "StopInterrupted"
 )
 
 // normalizeEvents — чужие имена событий → канонические. Неизвестные проходят.
