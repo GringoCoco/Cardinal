@@ -184,9 +184,13 @@ func cmdTestPerm() error {
 		wait = 110
 	}
 	sid := fmt.Sprintf("testperm-%d", time.Now().Unix())
+	cwd, _ := os.Getwd()
+	if cwd == "" {
+		cwd = "/"
+	}
 	payload := fmt.Sprintf(`{"hook_event_name":"PermissionRequest","session_id":%q,`+
 		`"coucou_agent":"Cardinal Test","tool_name":"shell",`+
-		`"tool_input":{"command":"echo cardinal-testperm"},"cwd":"%s"}`, sid, config.Path())
+		`"tool_input":{"command":"echo cardinal-testperm"},"cwd":%q}`, sid, cwd)
 
 	url := fmt.Sprintf("http://127.0.0.1:%d/hook", cfg.Port)
 	fmt.Printf("→ PermissionRequest (session %s) в %s\n", sid, url)
