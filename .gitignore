@@ -1,6 +1,6 @@
-# бинари
-cardinald
-cardinald.exe
+# бинари (только в корне репо — не исходники cmd/cardinald)
+/cardinald
+/cardinald.exe
 /dist/
 
 # тесты и мусор
