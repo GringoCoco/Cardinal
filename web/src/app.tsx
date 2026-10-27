@@ -33,14 +33,16 @@ function stateIcon(state?: string): string {
 function PermCard({ item, onResolve }: { item: FeedItem; onResolve: (id: string, allow: boolean) => void }) {
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<null | boolean>(null);
+  const [err, setErr] = useState("");
   const decide = async (allow: boolean) => {
     setBusy(true);
+    setErr("");
     try {
       await resolve(item.permId!, allow);
       setDone(allow);
     } catch (e) {
+      setErr((e as Error).message);
       setBusy(false);
-      alert("Не вышло: " + (e as Error).message);
     }
   };
   return (
@@ -52,10 +54,13 @@ function PermCard({ item, onResolve }: { item: FeedItem; onResolve: (id: string,
       </div>
       <div class="summary">{item.summary}</div>
       {done === null ? (
-        <div class="buttons">
-          <button class="allow" disabled={busy} onClick={() => decide(true)}>✅ Разрешить</button>
-          <button class="deny" disabled={busy} onClick={() => decide(false)}>⛔ Запретить</button>
-        </div>
+        <>
+          <div class="buttons">
+            <button class="allow" disabled={busy} onClick={() => decide(true)}>✅ Разрешить</button>
+            <button class="deny" disabled={busy} onClick={() => decide(false)}>⛔ Запретить</button>
+          </div>
+          {err && <div class="err">{err}</div>}
+        </>
       ) : (
         <div class="resolved">{done ? "✅ разрешено" : "⛔ запрещено"}</div>
       )}
@@ -110,6 +115,7 @@ export function App() {
   const [feed, setFeed] = useState<FeedItem[]>([]);
   const [agent, setAgent] = useState("claude");
   const [prompt, setPrompt] = useState("");
+  const [promptErr, setPromptErr] = useState("");
   const conn = useRef<Conn>({ online: false, ws: null });
 
   useEffect(() => {
@@ -165,6 +171,7 @@ export function App() {
   const sendPrompt = async () => {
     const text = prompt.trim();
     if (!text) return;
+    setPromptErr("");
     try {
       await send("prompt", { agent, text });
       setPrompt("");
@@ -173,7 +180,7 @@ export function App() {
         ...prev,
       ]);
     } catch (e) {
-      alert("Не отправилось: " + (e as Error).message);
+      setPromptErr((e as Error).message);
     }
   };
 
@@ -216,6 +223,7 @@ export function App() {
           onInput={(e) => setPrompt((e.target as HTMLTextAreaElement).value)}
         />
         <button class="send" disabled={!prompt.trim()} onClick={sendPrompt}>Отправить</button>
+        {promptErr && <div class="err">{promptErr}</div>}
       </section>
 
       <section>
