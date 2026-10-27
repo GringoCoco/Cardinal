@@ -92,7 +92,12 @@ func (h *Hook) Summary() string {
 	if len(h.ToolInput) == 0 {
 		return h.Tool
 	}
-	for _, key := range []string{"command", "file_path", "pattern", "url", "path"} {
+	// Команда — исключение из privacy-default: без неё решение Allow/Deny
+	// небезопасно. Не обрезаем её до размеров push-превью.
+	if command, ok := h.ToolInput["command"].(string); ok && command != "" {
+		return h.Tool + ": " + command
+	}
+	for _, key := range []string{"file_path", "pattern", "url", "path"} {
 		if v, ok := h.ToolInput[key].(string); ok && v != "" {
 			if len(v) > 80 {
 				v = v[:80] + "…"
