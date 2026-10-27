@@ -39,15 +39,34 @@ go build -o ~/.local/bin/cardinald ./cmd/cardinald
 # 2. привяжи бота (введёт токен, потом пришлёт /start <код> боту)
 cardinald pair
 
-# 3. поставь хуки Claude Code (бэкап + diff + подтверждение)
+# 3. поставь daemon в автозапуск (LaunchAgent: старт при входе, рестарт при падении)
+./scripts/install_launchagent.sh
+
+# 4a. хуки Claude Code (бэкап + diff + подтверждение)
 cp hooks/cardinal-hook ~/.local/bin/ && chmod +x ~/.local/bin/cardinal-hook
 python3 scripts/install_claude_hooks.py
 
-# 4. запуск
-cardinald run
+# 4b. плагин OpenCode (события + кнопки разрешений)
+python3 scripts/install_opencode_plugin.py
 ```
 
 Проверка: `cardinald testevent` — придёт тестовое уведомление.
+
+### OpenCode
+
+Плагин подключается через глобальный `opencode.json` (установщик делает это
+сам, с бэкапом). Что он делает:
+
+| Событие OpenCode (V2) | Пуш в Telegram |
+|---|---|
+| `session.created` | тихий статус «начал сессию» |
+| `session.execution.succeeded` | «🟢 готово» |
+| `session.execution.failed` | «🔴 ошибка» |
+| `session.execution.interrupted` | «⏹ остановлено» |
+| permission rule → `ask` | карточка с кнопками ✅/⛔, ответ уходит агенту |
+
+Отладка плагина: `CARDINAL_DEBUG=1 opencode run …` — события пишутся в
+`/tmp/cardinal-plugin.log`, а копии уходят в daemon (видно в его логе).
 
 ## Как это работает
 
