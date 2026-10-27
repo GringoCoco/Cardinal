@@ -281,8 +281,8 @@ func (s *Server) staticHandler() http.Handler {
 			return
 		}
 		// index.html — никогда не кэшировать (ассеты за ним хешированные);
-		// хешированные ассеты — навсегда.
-		if strings.HasSuffix(r.URL.Path, "/") || strings.HasSuffix(r.URL.Path, ".html") {
+		// хешированные ассеты — навсегда. StripPrefix отдаёт "" для /app/.
+		if r.URL.Path == "" || strings.HasSuffix(r.URL.Path, "/") || strings.HasSuffix(r.URL.Path, ".html") {
 			w.Header().Set("Cache-Control", "no-store")
 		} else {
 			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
