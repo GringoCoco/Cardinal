@@ -33,13 +33,14 @@ func DecisionWaitOf(cfg *config.Config) time.Duration {
 
 // PendingPerm — запрос разрешения, ждущий решения из Telegram.
 type PendingPerm struct {
-	ID       string
-	Agent    string
-	Project  string
-	Summary  string
-	ChatID   int64
-	MsgID    int64
-	Decision chan events.Decision
+	ID        string
+	SessionID string
+	Agent     string
+	Project   string
+	Summary   string
+	ChatID    int64
+	MsgID     int64
+	Decision  chan events.Decision
 }
 
 type Daemon struct {
@@ -140,10 +141,13 @@ func (d *Daemon) dispatch(h *events.Hook) {
 	}
 	switch h.Canonical() {
 	case events.Stop:
+		d.cancelPending(h.SessionID, "сессия завершилась")
 		d.send(h.NamedAgent()+" 🟢 готово", h, false, nil, nil)
 	case events.StopFailure:
+		d.cancelPending(h.SessionID, "сессия завершилась с ошибкой")
 		d.send(h.NamedAgent()+" 🔴 ошибка", h, false, nil, nil)
 	case events.StopInterrupted:
+		d.cancelPending(h.SessionID, "сессия остановлена")
 		d.send(h.NamedAgent()+" ⏹ остановлено", h, false, nil, nil)
 	case events.Notification:
 		msg := h.Message
@@ -161,14 +165,42 @@ func (d *Daemon) dispatch(h *events.Hook) {
 	}
 }
 
+// cancelPending — сессия завершилась: гасим её живые карточки разрешений,
+// снимаем кнопки и объясняем, почему решение больше не нужно.
+func (d *Daemon) cancelPending(sessionID, reason string) {
+	if sessionID == "" {
+		return
+	}
+	d.mu.Lock()
+	var cancelled []*PendingPerm
+	for _, p := range d.pending {
+		if p.SessionID == sessionID {
+			cancelled = append(cancelled, p)
+			delete(d.pending, p.ID)
+		}
+	}
+	d.mu.Unlock()
+	for _, p := range cancelled {
+		select {
+		case p.Decision <- events.DecisionNone:
+		default:
+		}
+		if p.ChatID != 0 && p.MsgID != 0 {
+			_ = d.tg.EditText(p.ChatID, p.MsgID,
+				"⌛ "+p.Agent+" — "+reason+"\n"+p.Summary)
+		}
+	}
+}
+
 // handlePermission — речь о безопасном решении: ждём ответ ≤ DecisionWait.
 func (d *Daemon) handlePermission(w http.ResponseWriter, h *events.Hook) {
 	p := &PendingPerm{
-		ID:       newID(),
-		Agent:    h.NamedAgent(),
-		Project:  h.Project(),
-		Summary:  h.Summary(),
-		Decision: make(chan events.Decision, 1),
+		ID:        newID(),
+		SessionID: h.SessionID,
+		Agent:     h.NamedAgent(),
+		Project:   h.Project(),
+		Summary:   h.Summary(),
+		Decision:  make(chan events.Decision, 1),
 	}
 	d.mu.Lock()
 	d.pending[p.ID] = p
@@ -301,6 +333,10 @@ func (d *Daemon) handleUpdate(u tg.Update) {
 	d.mu.Unlock()
 
 	if !ok {
+		// карточка уже обработана/истекла — снимаем кнопки, чтобы не висела
+		if cb.Message != nil && cb.Message.MessageID != 0 && d.allowedChat(cb.From.ID) {
+			_ = d.tg.EditText(cb.From.ID, cb.Message.MessageID, "⌛ Карточка уже обработана или истекла")
+		}
 		_ = d.tg.AnswerCallback(cb.ID, "Уже решено или истекло")
 		return
 	}

@@ -26,8 +26,13 @@ type Update struct {
 		From struct {
 			ID int64 `json:"id"`
 		} `json:"from"`
-		Data      string `json:"data"`
-		MessageID int    `json:"message,omitempty"`
+		Data    string `json:"data"`
+		Message *struct {
+			MessageID int64 `json:"message_id"`
+			Chat      struct {
+				ID int64 `json:"id"`
+			} `json:"chat"`
+		} `json:"message"`
 	} `json:"callback_query"`
 }
 
@@ -133,6 +138,17 @@ func (c *Client) EditMarkup(chatID, messageID int64, markup *ReplyMarkup) error 
 		params.Set("reply_markup", `{"inline_keyboard":[]}`)
 	}
 	return c.call("editMessageReplyMarkup", params, nil)
+}
+
+// EditText — заменить текст сообщения (карточки разрешения).
+func (c *Client) EditText(chatID, messageID int64, text string) error {
+	params := url.Values{
+		"chat_id":                  {fmt.Sprint(chatID)},
+		"message_id":               {fmt.Sprint(messageID)},
+		"text":                     {text},
+		"disable_web_page_preview": {"true"},
+	}
+	return c.call("editMessageText", params, nil)
 }
 
 // Me — базовая проверка токена (getMe): возвращает @username бота.
