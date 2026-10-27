@@ -99,7 +99,19 @@ Claude Code ──hook──► cardinal-hook ──POST──► cardinald (:97
 - [ ] **Фаза 4** — menu-bar/notch приложение на Swift: сгусток энергии в вырезе,
   статус агентов, быстрые действия
 
-## Развёртывание relay (Fly.io)
+## Развёртывание relay
+
+Вариант без оплаты — Cloudflare quick-tunnel (relayd крутится на том же Mac,
+наружу — постоянный WSS через Cloudflare; URL меняется при каждом запуске —
+скрипт сам переподключает daemon):
+
+```bash
+brew install cloudflared
+go build -o ~/.local/bin/relayd ./cmd/relayd
+scripts/relay_cloudflared.sh
+```
+
+Вариант с стабильным адресом — Fly.io (нужна карта, usage копеечный):
 
 ```bash
 brew install flyctl && flyctl auth login
