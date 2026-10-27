@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import {
   FeedItem,
-  initData,
+  groupSessions,
   me,
   pair,
   ready,
@@ -10,8 +10,6 @@ import {
   toFeedItem,
   wsURL,
 } from "./api";
-
-type Conn = { online: boolean; ws: WebSocket | null };
 
 function fmtTime(ts: number): string {
   const d = new Date(ts);
@@ -43,7 +41,7 @@ function agentLabel(agent?: string): string {
   }
 }
 
-function PermCard({ item, onResolve }: { item: FeedItem; onResolve: (id: string, allow: boolean) => void }) {
+function PermCard({ item }: { item: FeedItem }) {
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<null | boolean>(null);
   const [err, setErr] = useState("");
@@ -59,26 +57,26 @@ function PermCard({ item, onResolve }: { item: FeedItem; onResolve: (id: string,
     }
   };
   return (
-    <div class={"card perm" + (done === null ? " pending" : "")}>
-      <div class="perm-top">
-        <span class="perm-icon">{item.agent === "opencode" || item.agent === "claude" ? "⚠" : "◈"}</span>
-        <div class="grow">
-          <div class="agent">{agentLabel(item.agent)}</div>
-          {item.project && <div class="project">· {item.project}</div>}
-          <div class="summary">{item.summary}</div>
+    <div className={"card perm" + (done === null ? " pending" : "")}>
+      <div className="perm-top">
+        <span className="perm-icon">⚠</span>
+        <div className="grow">
+          <div className="agent">{agentLabel(item.agent)}</div>
+          {item.project && <div className="project">· {item.project}</div>}
+          <div className="summary">{item.summary}</div>
         </div>
-        <span class="time">{fmtTime(item.time)}</span>
+        <span className="time">{fmtTime(item.time)}</span>
       </div>
       {done === null ? (
         <>
-          <div class="buttons">
-            <button class="allow" disabled={busy} onClick={() => decide(true)}>✅ Разрешить</button>
-            <button class="deny" disabled={busy} onClick={() => decide(false)}>⛔ Запретить</button>
+          <div className="buttons">
+            <button className="allow" disabled={busy} onClick={() => decide(true)}>✅ Разрешить</button>
+            <button className="deny" disabled={busy} onClick={() => decide(false)}>⛔ Запретить</button>
           </div>
-          {err && <div class="err">{err}</div>}
+          {err && <div className="err">{err}</div>}
         </>
       ) : (
-        <div class="resolved">{done ? "✓ Решение принято — разрешено" : "✕ Решение принято — запрещено"}</div>
+        <div className="resolved">{done ? "✓ Решение принято — разрешено" : "✕ Решение принято — запрещено"}</div>
       )}
     </div>
   );
@@ -101,13 +99,13 @@ function PairScreen({ onPaired }: { onPaired: () => void }) {
     }
   };
   return (
-    <div class="pair">
-      <div class="pair-core">
-        <div class="orb"><div class="orb-core" /></div>
+    <div className="pair">
+      <div className="pair-core">
+        <div className="orb"><div className="orb-core" /></div>
         <h1>CARDINAL</h1>
-        <p class="tag">агентские события → решения, которые живут на Mac</p>
+        <p className="tag">агентские события → решения, которые живут на Mac</p>
       </div>
-      <form onSubmit={submit} class="pair-form">
+      <form onSubmit={submit} className="pair-form">
         <input
           placeholder="КОД ПАРЫ"
           value={code}
@@ -117,7 +115,7 @@ function PairScreen({ onPaired }: { onPaired: () => void }) {
         />
         <button disabled={busy || code.trim().length < 4}>Привязать</button>
       </form>
-      {err && <div class="err">{err}</div>}
+      {err && <div className="err">{err}</div>}
     </div>
   );
 }
@@ -128,15 +126,19 @@ const AGENTS = [
   { key: "codex", label: "Codex" },
 ];
 
+function isRunning(state?: string): boolean {
+  return state === "started" || state === "sent";
+}
+
 export function App() {
   const [tab, setTab] = useState<"feed" | "prompt">("feed");
-  const [paired, setPaired] = useState<boolean | null>(null); // null = проверяем
+  const [paired, setPaired] = useState<boolean | null>(null);
   const [deviceOnline, setDeviceOnline] = useState(false);
   const [feed, setFeed] = useState<FeedItem[]>([]);
   const [agent, setAgent] = useState("claude");
   const [prompt, setPrompt] = useState("");
   const [promptErr, setPromptErr] = useState("");
-  const conn = useRef<Conn>({ online: false, ws: null });
+  const conn = useRef<{ online: boolean; ws: WebSocket | null }>({ online: false, ws: null });
 
   useEffect(() => {
     ready();
@@ -184,8 +186,7 @@ export function App() {
     };
   }, [paired]);
 
-  const pending = useMemo(() => feed.filter((f) => f.kind === "perm"), [feed]);
-  const events = useMemo(() => feed.filter((f) => f.kind !== "perm"), [feed]);
+  const groups = useMemo(() => groupSessions(feed), [feed]);
 
   const sendPrompt = async () => {
     const text = prompt.trim();
@@ -195,7 +196,7 @@ export function App() {
       await send("prompt", { agent, text });
       setPrompt("");
       setFeed((prev) => [
-        { kind: "info", id: `q-${Date.now()}`, time: Date.now(), agent, state: "sent", summary: text.slice(0, 80) },
+        { kind: "info", id: `q-${Date.now()}`, time: Date.now(), agent, state: "sent", summary: text.slice(0, 80), sid: `q-${agent}-${Date.now()}` },
         ...prev,
       ]);
       setTab("feed");
@@ -204,90 +205,86 @@ export function App() {
     }
   };
 
-  const onResolve = (permId: string, allow: boolean) => {
-    setFeed((prev) => prev.filter((f) => f.permId !== permId));
-  };
-
-  if (paired === null) return <div class="loading">…</div>;
+  if (paired === null) return <div className="loading">…</div>;
   if (paired === false) return <PairScreen onPaired={() => setPaired(true)} />;
 
   const orbPulse = deviceOnline ? "on" : "off";
 
   return (
-    <div class="screen">
-      <div class="ambient"><div class="glow g1" /><div class="glow g2" /></div>
+    <div className="screen">
+      <div className="ambient"><div className="glow g1" /><div className="glow g2" /></div>
 
-      <header class="hud">
-        <div class="logo">
-          <div class="logo-mark"><div class={"orb-core " + orbPulse} /></div>
-          <span class="name">CARDINAL</span>
+      <header className="hud">
+        <div className="logo">
+          <div className="logo-mark"><div className={"orb-core " + orbPulse} /></div>
+          <span className="name">CARDINAL</span>
         </div>
-        <div class={"status " + orbPulse}>
-          <span class="dot" />
+        <div className={"status " + orbPulse}>
+          <span className="dot" />
           {deviceOnline ? "Mac на связи" : "Mac не в сети"}
         </div>
       </header>
 
       {tab === "feed" && (
-        <main class="tab">
-          {pending.length > 0 && (
-            <section class="section pending-wrap">
-              <h2 class="sec-title">Ждут решения</h2>
-              {pending.map((p) => <PermCard key={p.permId ?? p.id} item={p} onResolve={onResolve} />)}
-            </section>
+        <main className="tab">
+          {groups.length === 0 && (
+            <div className="empty">
+              <div className="empty-orb">◯</div>
+              <p>Тихо. Ожидаю события…</p>
+            </div>
           )}
-          <section class="section">
-            <h2 class="sec-title">События агентов</h2>
-            {events.length === 0 && (
-              <div class="empty">
-                <div class="empty-orb">◯</div>
-                <p>Тихо. Ожидаю события…</p>
-              </div>
-            )}
-            {events.map((e) => (
-              <div class="card event" key={e.id}>
-                <div class="row">
-                  <span class="eicon">{stateIcon(e.state)}</span>
-                  <span class="agent">{agentLabel(e.agent)}</span>
-                  {e.project && <span class="project">· {e.project}</span>}
-                  <span class="time">{fmtTime(e.time)}</span>
+          {groups.map((g) => {
+            const running = isRunning(g.state);
+            const pendingItem = g.items.find((i) => i.kind === "perm");
+            return (
+              <div className={"card session" + (running ? " live" : "")} key={g.sid}>
+                <div className="row">
+                  <span className="eicon">{stateIcon(g.state)}</span>
+                  <span className="agent">{agentLabel(g.agent)}</span>
+                  {g.project && <span className="project">· {g.project}</span>}
+                  <span className="time">{fmtTime(g.items[0]?.time ?? Date.now())}</span>
                 </div>
-                {e.summary && <div class="summary">{e.summary}</div>}
+                {g.items[g.items.length - 1]?.summary && <div className="summary">{g.items[g.items.length - 1]?.summary}</div>}
+                {pendingItem ? (
+                  <PermCard item={pendingItem} />
+                ) : running ? (
+                  <div className="running">◈ генерирует…</div>
+                ) : null}
               </div>
-            ))}
-          </section>
+            );
+          })}
         </main>
       )}
 
       {tab === "prompt" && (
-        <main class="tab">
-          <section class="section">
-            <h2 class="sec-title">Промпт агенту</h2>
-            <div class="pills">
+        <main className="tab">
+          <section className="section">
+            <h2 className="sec-title">Промпт агенту</h2>
+            <div className="pills">
               {AGENTS.map((a) => (
-                <button key={a.key} class={"pill" + (agent === a.key ? " active" : "")} onClick={() => setAgent(a.key)}>
+                <button key={a.key} className={"pill" + (agent === a.key ? " active" : "")} onClick={() => setAgent(a.key)}>
                   {a.label}
                 </button>
               ))}
             </div>
             <textarea
               rows={3}
-              placeholder={`Что должен сделать ${agentLabel(agent)}?`}
+              placeholder={`Что должен делать ${agentLabel(agent)}?`}
               value={prompt}
               onInput={(e) => setPrompt((e.target as HTMLTextAreaElement).value)}
             />
-            <button class="send" disabled={!prompt.trim()} onClick={sendPrompt}>Отправить</button>
-            {promptErr && <div class="err">{promptErr}</div>}
+            <button className="send" disabled={!prompt.trim()} onClick={sendPrompt}>Отправить</button>
+            {promptErr && <div className="err">{promptErr}</div>}
           </section>
         </main>
       )}
 
-      <nav class="tabbar">
-        <button class={tab === "feed" ? "tab active" : "tab"} onClick={() => setTab("feed")}>
-          <span class="ticon">◎</span><span class="tlabel">События</span>
+      <nav className="tabbar">
+        <button className={tab === "feed" ? "tab active" : "tab"} onClick={() => setTab("feed")}>
+          <span className="ticon">◎</span><span className="tlabel">События</span>
         </button>
-        <button class={tab === "prompt" ? "tab active" : "tab"} onClick={() => setTab("prompt")}>
-          <span class="ticon">➜</span><span class="tlabel">Промпт</span>
+        <button className={tab === "prompt" ? "tab active" : "tab"} onClick={() => setTab("prompt")}>
+          <span className="ticon">➜</span><span className="tlabel">Промпт</span>
         </button>
       </nav>
     </div>

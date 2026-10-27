@@ -160,12 +160,12 @@ func (d *Daemon) dispatch(h *events.Hook) {
 	case "":
 	default:
 		d.relay.SendStatus(relay.TypeSessionFinished, map[string]string{
-			"agent": h.NamedAgent(), "state": state, "project": h.Project(),
+			"agent": h.NamedAgent(), "state": state, "project": h.Project(), "session_id": h.SessionID,
 		})
 	}
 	if h.Canonical() == events.SessionStart {
 		d.relay.SendStatus(relay.TypeSessionStatus, map[string]string{
-			"agent": h.NamedAgent(), "state": "started", "project": h.Project(),
+			"agent": h.NamedAgent(), "state": "started", "project": h.Project(), "session_id": h.SessionID,
 		})
 	}
 
@@ -262,7 +262,7 @@ func (d *Daemon) handlePermission(w http.ResponseWriter, h *events.Hook) {
 
 	// Релей: карточка появляется и в Mini App (в снапшоте — тоже).
 	d.relay.SendStatus(relay.TypePermRequest, map[string]string{
-		"id": p.ID, "agent": p.Agent, "summary": p.Summary, "project": p.Project,
+		"id": p.ID, "agent": p.Agent, "summary": p.Summary, "project": p.Project, "session_id": p.SessionID,
 	})
 
 	select {

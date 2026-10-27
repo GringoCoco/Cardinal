@@ -1,4 +1,4 @@
-// Cardinal Mini App: снапшот сессий, карточки разрешений, промпты агентам.
+// Cardinal Mini App: сессии, лента, карточки разрешений, промпты агентам.
 // Транспорт — relay: REST /api/* + WS /ws/app. Авторизация — Telegram initData.
 
 export type Envelope = {
@@ -13,10 +13,19 @@ export type FeedItem = {
   id: string;
   time: number;
   agent?: string;
-  state?: string; // started | ok | error | interrupted | allow | deny
+  state?: string;
   project?: string;
   summary?: string;
   permId?: string;
+  sid?: string;
+};
+
+export type SessionGroup = {
+  sid: string;
+  agent?: string;
+  project?: string;
+  state?: string;
+  items: FeedItem[];
 };
 
 type Me = { paired: boolean; online?: boolean; device?: string; name?: string };
@@ -32,7 +41,6 @@ export function ready() {
 }
 
 export function apiBase(): string {
-  // страница отдаётся самим relayd (/app/) — API тот же origin
   return location.origin;
 }
 
@@ -79,15 +87,30 @@ export function resolve(permId: string, allow: boolean): Promise<void> {
   return send("permission.resolve", { id: permId, decision: allow ? "allow" : "deny" });
 }
 
-// конверт → элемент ленты
 export function toFeedItem(env: Envelope): FeedItem | null {
   const b = env.body ?? {};
   const time = Date.now();
   switch (env.type) {
     case "session.status":
-      return { kind: "session", id: `s-${time}-${Math.random()}`, time, agent: b.agent, state: b.state, project: b.project };
+      return {
+        kind: "session",
+        id: b.session_id ?? `s-${time}-${Math.random()}`,
+        time,
+        agent: b.agent,
+        state: b.state,
+        project: b.project,
+        sid: b.session_id,
+      };
     case "session.finished":
-      return { kind: "session", id: `f-${time}-${Math.random()}`, time, agent: b.agent, state: b.state, project: b.project };
+      return {
+        kind: "session",
+        id: b.session_id ?? `f-${time}-${Math.random()}`,
+        time,
+        agent: b.agent,
+        state: b.state,
+        project: b.project,
+        sid: b.session_id,
+      };
     case "permission.request":
       return {
         kind: "perm",
@@ -97,14 +120,44 @@ export function toFeedItem(env: Envelope): FeedItem | null {
         project: b.project,
         summary: b.summary,
         permId: b.id,
+        sid: b.session_id,
       };
     case "permission.resolved":
-      return { kind: "info", id: `r-${time}-${Math.random()}`, time, agent: b.agent, state: b.decision, permId: b.id, summary: b.summary };
+      return {
+        kind: "info",
+        id: `r-${time}-${Math.random()}`,
+        time,
+        agent: b.agent,
+        state: b.decision,
+        permId: b.id,
+        summary: b.summary,
+        sid: b.id,
+      };
     case "prompt.accepted":
-      return { kind: "info", id: `pa-${time}-${Math.random()}`, time, agent: b.agent, state: "sent", summary: `принято · ${b.cwd ?? ""}` };
+      return { kind: "info", id: `pa-${time}-${Math.random()}`, time, agent: b.agent, state: "sent", summary: `принято · ${b.cwd ?? ""}`, sid: b.sid };
     case "prompt.rejected":
-      return { kind: "info", id: `pr-${time}-${Math.random()}`, time, agent: b.agent, state: "error", summary: b.reason };
+      return { kind: "info", id: `pr-${time}-${Math.random()}`, time, agent: b.agent, state: "error", summary: b.reason, sid: b.sid };
     default:
       return null;
   }
+}
+
+export function groupSessions(feed: FeedItem[]): SessionGroup[] {
+  const map = new Map<string, SessionGroup>();
+  for (const it of feed) {
+    const sid = it.sid ?? it.permId ?? it.id;
+    if (!sid) continue;
+    let g = map.get(sid);
+    if (!g) {
+      g = { sid, agent: it.agent, project: it.project, state: it.state, items: [] };
+      map.set(sid, g);
+    }
+    g.items.push(it);
+    g.state = it.state;
+    g.agent = g.agent ?? it.agent;
+    g.project = g.project ?? it.project;
+  }
+  const list = [...map.values()];
+  list.sort((a, b) => (b.items[0]?.time ?? 0) - (a.items[0]?.time ?? 0));
+  return list;
 }

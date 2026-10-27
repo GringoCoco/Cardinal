@@ -422,6 +422,6 @@ func (d *Daemon) resolvePermByID(id string, allow bool) {
 		state = "allow"
 	}
 	d.relay.SendStatus(relay.TypePermResolved, map[string]string{
-		"id": id, "decision": state, "agent": p.Agent, "summary": p.Summary,
+		"id": id, "decision": state, "agent": p.Agent, "summary": p.Summary, "session_id": p.SessionID,
 	})
 }
