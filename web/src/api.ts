@@ -100,6 +100,10 @@ export function toFeedItem(env: Envelope): FeedItem | null {
       };
     case "permission.resolved":
       return { kind: "info", id: `r-${time}-${Math.random()}`, time, agent: b.agent, state: b.decision, permId: b.id, summary: b.summary };
+    case "prompt.accepted":
+      return { kind: "info", id: `pa-${time}-${Math.random()}`, time, agent: b.agent, state: "sent", summary: `принято · ${b.cwd ?? ""}` };
+    case "prompt.rejected":
+      return { kind: "info", id: `pr-${time}-${Math.random()}`, time, agent: b.agent, state: "error", summary: b.reason };
     default:
       return null;
   }

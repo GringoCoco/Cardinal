@@ -25,6 +25,7 @@ function stateIcon(state?: string): string {
     case "interrupted": return "⏹";
     case "allow": return "✅";
     case "deny": return "⛔";
+    case "sent": return "🚀";
     default: return "•";
   }
 }
