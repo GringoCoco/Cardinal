@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -57,6 +58,59 @@ func buildSigned(t *testing.T, botToken string, authDate time.Time, extra map[st
 		q += "&" + k + "=" + v
 	}
 	return q + "&hash=" + hash
+}
+
+func TestSnapshotUpsertAndPermissionRemoval(t *testing.T) {
+	h := NewHub()
+	d, _ := h.Register("mac-1", "Mac")
+	env := func(typ, body string) Envelope {
+		return Envelope{Type: typ, Body: json.RawMessage(body)}
+	}
+	h.mu.Lock()
+	h.updateSnapshotLocked(d, env(TypeSessionStatus, `{"session_id":"s1","state":"running"}`))
+	h.updateSnapshotLocked(d, env(TypeSessionFinished, `{"session_id":"s1","state":"completed"}`))
+	h.updateSnapshotLocked(d, env(TypePermRequest, `{"id":"p1","session_id":"s1"}`))
+	h.updateSnapshotLocked(d, env(TypePermResolved, `{"id":"p1","decision":"allow"}`))
+	h.mu.Unlock()
+	if len(d.Snapshot) != 1 {
+		t.Fatalf("snapshot len = %d, want 1", len(d.Snapshot))
+	}
+	if d.Snapshot[0].Type != TypeSessionFinished {
+		t.Fatalf("snapshot type = %q", d.Snapshot[0].Type)
+	}
+}
+
+func TestHubUnpair(t *testing.T) {
+	h := NewHub()
+	_, _ = h.Register("mac-1", "Mac")
+	code, _ := h.SetPairCode("mac-1")
+	d, ok := h.PairByCode(code, 111)
+	if !ok || d.ChatID != 111 {
+		t.Fatal("pair failed")
+	}
+	if !h.UnpairByChat(111) || h.DeviceByChat(111) != nil || d.ChatID != 0 {
+		t.Fatal("unpair failed")
+	}
+}
+
+func TestPairReplacesPreviousMapping(t *testing.T) {
+	h := NewHub()
+	first, _ := h.Register("mac-1", "Mac 1")
+	second, _ := h.Register("mac-2", "Mac 2")
+	code, _ := h.SetPairCode(first.ID)
+	if _, ok := h.PairByCode(code, 111); !ok {
+		t.Fatal("first pair failed")
+	}
+	code, _ = h.SetPairCode(second.ID)
+	if _, ok := h.PairByCode(code, 111); !ok {
+		t.Fatal("second pair failed")
+	}
+	if got := h.DeviceByChat(111); got != second {
+		t.Fatalf("chat still points to %#v", got)
+	}
+	if first.ChatID != 0 {
+		t.Fatalf("old device still paired to %d", first.ChatID)
+	}
 }
 
 func TestValidateInitData(t *testing.T) {

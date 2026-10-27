@@ -51,11 +51,35 @@ type Daemon struct {
 	mu          sync.Mutex
 	pending     map[string]*PendingPerm
 	lastByAgent map[string]lastInfo
+	sessions    map[string]*sessionState
+	processes   map[string]*managedProcess
 	httpSrv     *http.Server
 }
 
 func New(cfg *config.Config) *Daemon {
-	return &Daemon{cfg: cfg, tg: tg.New(cfg.BotToken), pending: map[string]*PendingPerm{}}
+	return &Daemon{
+		cfg: cfg, tg: tg.New(cfg.BotToken),
+		pending: map[string]*PendingPerm{}, sessions: map[string]*sessionState{},
+		processes: map[string]*managedProcess{},
+	}
+}
+
+func (d *Daemon) notifyPermissions() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.cfg.NotifyPermissions()
+}
+
+func (d *Daemon) notifyCompleted() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.cfg.NotifyCompleted()
+}
+
+func (d *Daemon) notifyErrors() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.cfg.NotifyErrors()
 }
 
 // Run — поднять HTTP-сервер хуков и цикл опроса Telegram (если chat_id задан).
@@ -146,6 +170,7 @@ func (d *Daemon) handleHook(w http.ResponseWriter, r *http.Request) {
 // ни текста промпта, ни команды — только агент и состояние
 // (приватность как у MauMau: push сообщает, детали смотришь на опции).
 func (d *Daemon) dispatch(h *events.Hook) {
+	d.trackHook(h)
 	state := ""
 	switch h.Canonical() {
 	case events.Stop:
@@ -155,18 +180,16 @@ func (d *Daemon) dispatch(h *events.Hook) {
 	case events.StopInterrupted:
 		state = "interrupted"
 	}
-	// Сначала релей (Mini App видит статусы даже без chat_id), потом пуш.
-	switch state {
-	case "":
-	default:
-		d.relay.SendStatus(relay.TypeSessionFinished, map[string]string{
-			"agent": h.NamedAgent(), "state": state, "project": h.Project(), "session_id": h.SessionID,
-		})
-	}
-	if h.Canonical() == events.SessionStart {
-		d.relay.SendStatus(relay.TypeSessionStatus, map[string]string{
-			"agent": h.NamedAgent(), "state": "started", "project": h.Project(), "session_id": h.SessionID,
-		})
+	// Завершение сессии должно закрыть ожидающие карточки даже в relay-only
+	// режиме. Telegram ниже остаётся необязательным каналом уведомлений.
+	if state != "" {
+		reason := "сессия завершилась"
+		if state == "error" {
+			reason = "сессия завершилась с ошибкой"
+		} else if state == "interrupted" {
+			reason = "сессия остановлена"
+		}
+		d.cancelPending(h.SessionID, reason)
 	}
 
 	if d.cfg.ChatID == 0 {
@@ -174,14 +197,17 @@ func (d *Daemon) dispatch(h *events.Hook) {
 	}
 	switch h.Canonical() {
 	case events.Stop:
-		d.cancelPending(h.SessionID, "сессия завершилась")
-		d.send(h.NamedAgent()+" 🟢 готово", h, false, nil, nil)
+		if d.notifyCompleted() {
+			d.send(h.NamedAgent()+" 🟢 готово", h, false, nil, nil)
+		}
 	case events.StopFailure:
-		d.cancelPending(h.SessionID, "сессия завершилась с ошибкой")
-		d.send(h.NamedAgent()+" 🔴 ошибка", h, false, nil, nil)
+		if d.notifyErrors() {
+			d.send(h.NamedAgent()+" 🔴 ошибка", h, false, nil, nil)
+		}
 	case events.StopInterrupted:
-		d.cancelPending(h.SessionID, "сессия остановлена")
-		d.send(h.NamedAgent()+" ⏹ остановлено", h, false, nil, nil)
+		if d.notifyErrors() {
+			d.send(h.NamedAgent()+" ⏹ остановлено", h, false, nil, nil)
+		}
 	case events.Notification:
 		msg := h.Message
 		if msg == "" {
@@ -191,10 +217,6 @@ func (d *Daemon) dispatch(h *events.Hook) {
 			msg = msg[:200] + "…"
 		}
 		d.send("💬 "+h.NamedAgent()+": "+msg, h, false, nil, nil)
-	case events.SessionStart:
-		d.send(h.NamedAgent()+" 🟡 начал сессию · "+h.Project(), h, true, nil, nil)
-	case events.SessionEnd:
-		d.send(h.NamedAgent()+" · сессия закрыта ("+h.Project()+")", h, true, nil, nil)
 	}
 }
 
@@ -222,6 +244,10 @@ func (d *Daemon) cancelPending(sessionID, reason string) {
 			_ = d.tg.EditText(p.ChatID, p.MsgID,
 				"⌛ "+p.Agent+" — "+reason+"\n"+p.Summary)
 		}
+		d.relay.SendStatus(relay.TypePermResolved, map[string]string{
+			"id": p.ID, "decision": "expired", "agent": p.Agent,
+			"summary": p.Summary, "session_id": p.SessionID,
+		})
 	}
 }
 
@@ -249,38 +275,46 @@ func (d *Daemon) handlePermission(w http.ResponseWriter, h *events.Hook) {
 		{Text: "⛔ Запретить", Data: "perm:" + p.ID + ":0"},
 	}}}
 
-	// Синхронно (кнопки сгенерированы до ожидания), но занимает ≤1.5 с.
-	msgID, err := d.send(text, h, false, markup, p)
-	if err != nil || d.cfg.ChatID == 0 {
-		log.Printf("permission: пуш не ушёл (%v) — отвечаю пустым и не блокирую агента", err)
+	// Сначала relay: Mini App может принять решение даже если Telegram-пуш
+	// временно недоступен. Карточка всё равно содержит команду полностью.
+	d.relay.SendStatus(relay.TypePermRequest, map[string]string{
+		"id": p.ID, "agent": p.Agent, "summary": p.Summary,
+		"project": p.Project, "session_id": p.SessionID, "cwd": h.CWD,
+	})
+	d.markSessionWaiting(p.SessionID)
+
+	msgID := int64(0)
+	var err error
+	if d.cfg.ChatID != 0 && d.notifyPermissions() {
+		// Синхронно (кнопки сгенерированы до ожидания), но занимает ≤1.5 с.
+		msgID, err = d.send(text, h, false, markup, p)
+	}
+	if !d.relay.IsConnected() && msgID == 0 {
+		log.Printf("permission: ни relay, ни Telegram недоступны (%v) — отвечаю пустым", err)
 		d.mu.Lock()
 		delete(d.pending, p.ID)
 		d.mu.Unlock()
+		// Если request уже попал в очередь relay, следом обязательно отправляем
+		// tombstone: после reconnect не должна всплыть неактуальная карточка.
+		d.relay.SendStatus(relay.TypePermResolved, map[string]string{
+			"id": p.ID, "decision": "expired", "agent": p.Agent,
+			"summary": p.Summary, "session_id": p.SessionID,
+		})
 		writeJSON(w, []byte("{}"))
 		return
 	}
 
-	// Релей: карточка появляется и в Mini App (в снапшоте — тоже).
-	d.relay.SendStatus(relay.TypePermRequest, map[string]string{
-		"id": p.ID, "agent": p.Agent, "summary": p.Summary, "project": p.Project, "session_id": p.SessionID,
-	})
-
 	select {
 	case dec := <-p.Decision:
 		writeJSON(w, decisionJSON(dec))
-		if dec != events.DecisionNone {
-			state := "deny"
-			if dec == events.DecisionAllow {
-				state = "allow"
-			}
-			d.relay.SendStatus(relay.TypePermResolved, map[string]string{
-				"id": p.ID, "decision": state,
-			})
-		}
 	case <-time.After(DecisionWaitOf(d.cfg)):
 		if msgID > 0 {
 			_ = d.tg.EditMarkup(d.cfg.ChatID, msgID, nil)
 		}
+		d.relay.SendStatus(relay.TypePermResolved, map[string]string{
+			"id": p.ID, "decision": "expired", "agent": p.Agent,
+			"summary": p.Summary, "session_id": p.SessionID,
+		})
 		writeJSON(w, []byte("{}"))
 	}
 
@@ -402,7 +436,9 @@ func (d *Daemon) handleUpdate(u tg.Update) {
 	// Mini App тоже должен увидеть, что решение принято из Telegram
 	d.relay.SendStatus(relay.TypePermResolved, map[string]string{
 		"id": p.ID, "decision": state, "agent": p.Agent, "summary": p.Summary,
+		"session_id": p.SessionID,
 	})
+	d.markSessionRunning(p.SessionID, "Решение принято — агент продолжает работу")
 }
 
 func writeJSON(w http.ResponseWriter, b []byte) {

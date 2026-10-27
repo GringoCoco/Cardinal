@@ -20,10 +20,12 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
 
+	"github.com/GringoCoco/cardinal/internal/config"
 	"github.com/GringoCoco/cardinal/internal/events"
 	"github.com/GringoCoco/cardinal/internal/relay"
 )
@@ -36,6 +38,7 @@ type RelayClient struct {
 	deviceTok string
 	mu        sync.Mutex
 	ch        chan relay.Envelope // очередь исходящих (одна горутина-писатель)
+	connected atomic.Bool
 }
 
 // newRelayClient — nil, если relay не настроен (фаза 0 живёт без него).
@@ -97,6 +100,8 @@ func (c *RelayClient) once(ctx context.Context) error {
 		}
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "bye")
+	c.connected.Store(true)
+	defer c.connected.Store(false)
 
 	log.Printf("relay: подключён к %s", c.base.Host)
 	defer log.Printf("relay: соединение закрыто")
@@ -117,6 +122,10 @@ func (c *RelayClient) once(ctx context.Context) error {
 			c.handleAppEnvelope(env)
 		}
 	}
+}
+
+func (c *RelayClient) IsConnected() bool {
+	return c != nil && c.connected.Load()
 }
 
 // writer — единственный писатель WS: тянет конверты из очереди.
@@ -192,13 +201,43 @@ func (c *RelayClient) handleAppEnvelope(env relay.Envelope) {
 
 	case relay.TypePrompt:
 		var body struct {
-			Agent string `json:"agent"`
-			Text  string `json:"text"`
+			Agent     string `json:"agent"`
+			Text      string `json:"text"`
+			SessionID string `json:"session_id"`
+			CWD       string `json:"cwd"`
 		}
 		if json.Unmarshal(env.Body, &body) != nil || body.Agent == "" || body.Text == "" {
 			return
 		}
-		c.d.spawnAgentPrompt(body.Agent, body.Text)
+		c.d.spawnAgentPrompt(body.Agent, body.Text, body.SessionID, body.CWD)
+
+	case relay.TypeSessionCmd:
+		var body struct {
+			SessionID string `json:"session_id"`
+			Action    string `json:"action"`
+		}
+		if json.Unmarshal(env.Body, &body) != nil || body.SessionID == "" || body.Action == "" {
+			return
+		}
+		c.d.handleSessionCommand(body.SessionID, body.Action)
+
+	case relay.TypeDeviceSync:
+		c.d.syncSessions()
+
+	case relay.TypeSettings:
+		var body struct {
+			Notifications config.NotificationSettings `json:"notifications"`
+		}
+		if json.Unmarshal(env.Body, &body) != nil {
+			return
+		}
+		c.d.mu.Lock()
+		c.d.cfg.Notifications = &body.Notifications
+		err := c.d.cfg.Save()
+		c.d.mu.Unlock()
+		if err != nil {
+			log.Printf("settings: не сохранил уведомления: %v", err)
+		}
 
 	case relay.TypeNotify:
 		var body struct {
@@ -276,10 +315,16 @@ func agentCommands(agent, text, sessionID string) ([]string, bool) {
 
 // spawnAgentPrompt — Mini App попросил агента поработать: запускаем его CLI
 // в его последней рабочей папке. Дальше события придут его же хуками.
-func (d *Daemon) spawnAgentPrompt(agent, text string) {
+func (d *Daemon) spawnAgentPrompt(agent, text, sessionID, cwd string) {
 	d.mu.Lock()
 	last := d.lastByAgent[agent]
 	d.mu.Unlock()
+	if sessionID != "" {
+		last.SessionID = sessionID
+	}
+	if cwd != "" {
+		last.CWD = cwd
+	}
 	if last.CWD == "" {
 		d.relay.SendStatus("prompt.rejected", map[string]string{
 			"agent": agent, "reason": "агент ещё ничего не делал на этом Mac — не знаю его рабочую папку",
@@ -296,20 +341,45 @@ func (d *Daemon) spawnAgentPrompt(agent, text string) {
 	cmd.Dir = last.CWD
 	logFile := fmt.Sprintf("/tmp/cardinal-%s-%d.log", agent, time.Now().Unix())
 	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	capturedLog := ""
 	if err == nil {
 		cmd.Stdout, cmd.Stderr = f, f
+		capturedLog = logFile
 	}
 	if err := cmd.Start(); err != nil {
+		if f != nil {
+			_ = f.Close()
+		}
 		d.relay.SendStatus("prompt.rejected", map[string]string{"agent": agent, "reason": err.Error()})
 		return
 	}
-	go func() {
-		_ = f.Close()
-		_ = cmd.Wait()
-	}()
-	log.Printf("prompt: %s в %s (лог %s)", agent, last.CWD, logFile)
+	managedID := last.SessionID
+	if managedID == "" {
+		managedID = fmt.Sprintf("launch-%s-%d", agent, time.Now().UnixMilli())
+	}
+	d.mu.Lock()
+	d.processes[managedID] = &managedProcess{Cmd: cmd, LogPath: capturedLog}
+	if s := d.sessions[managedID]; s != nil {
+		s.LogPath = capturedLog
+	}
+	d.mu.Unlock()
+	go func(id string) {
+		err := cmd.Wait()
+		if f != nil {
+			_ = f.Close()
+		}
+		d.mu.Lock()
+		delete(d.processes, id)
+		d.mu.Unlock()
+		if err != nil {
+			d.relay.SendStatus(relay.TypeSessionAction, map[string]any{
+				"session_id": id, "action": "process.exit", "ok": false, "error": err.Error(),
+			})
+		}
+	}(managedID)
+	log.Printf("prompt: %s в %s (лог %s)", agent, last.CWD, capturedLog)
 	d.relay.SendStatus("prompt.accepted", map[string]string{
-		"agent": agent, "cwd": last.CWD, "log": logFile,
+		"agent": agent, "sid": managedID,
 	})
 }
 
@@ -322,8 +392,11 @@ func (c *RelayClient) reRegister(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	c.d.mu.Lock()
 	c.d.cfg.DeviceToken = tok
-	if err := c.d.cfg.Save(); err != nil {
+	err = c.d.cfg.Save()
+	c.d.mu.Unlock()
+	if err != nil {
 		return "", fmt.Errorf("сохранил не смог: %w", err)
 	}
 	c.mu.Lock()
@@ -424,4 +497,5 @@ func (d *Daemon) resolvePermByID(id string, allow bool) {
 	d.relay.SendStatus(relay.TypePermResolved, map[string]string{
 		"id": id, "decision": state, "agent": p.Agent, "summary": p.Summary, "session_id": p.SessionID,
 	})
+	d.markSessionRunning(p.SessionID, "Решение принято — агент продолжает работу")
 }

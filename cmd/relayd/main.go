@@ -75,6 +75,7 @@ func main() {
 	mux.HandleFunc("POST /api/pair", s.handlePair)
 	mux.HandleFunc("GET /api/me", s.handleMe)
 	mux.HandleFunc("POST /api/send", s.handleSend)
+	mux.HandleFunc("POST /api/unpair", s.handleUnpair)
 	mux.HandleFunc("GET /ws/device", s.handleDeviceWS)
 	mux.HandleFunc("GET /ws/app", s.handleAppWS)
 	mux.Handle("/app/", http.StripPrefix("/app/", s.staticHandler()))
@@ -223,6 +224,18 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "daemon не на связи", http.StatusServiceUnavailable)
 	}
 	w.WriteHeader(http.StatusAccepted)
+}
+
+func (s *Server) handleUnpair(w http.ResponseWriter, r *http.Request) {
+	id := s.authInitData(w, r)
+	if id == nil {
+		return
+	}
+	if !s.hub.UnpairByChat(id.ChatID) {
+		http.Error(w, "нет привязки устройства", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
 }
 
 // ── WebSocket ──────────────────────────────────────────────────────────

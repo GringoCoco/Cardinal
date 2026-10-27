@@ -1,47 +1,96 @@
-// Cardinal Mini App: сессии, лента, карточки разрешений, промпты агентам.
-// Транспорт — relay: REST /api/* + WS /ws/app. Авторизация — Telegram initData.
+// Typed transport and the single event reducer used by every Mini App screen.
 
-export type Envelope = {
-  v?: number;
-  to?: string;
-  type: string;
-  body?: any;
-};
+export type Envelope = { v?: number; to?: string; type: string; body?: any };
 
-export type FeedItem = {
-  kind: "session" | "perm" | "info";
+export type SessionState =
+  | "running"
+  | "waiting"
+  | "paused"
+  | "completed"
+  | "error"
+  | "stopped";
+
+export type Session = {
   id: string;
-  time: number;
-  agent?: string;
-  state?: string;
-  project?: string;
-  summary?: string;
-  permId?: string;
-  sid?: string;
+  agent: string;
+  provider: string;
+  project: string;
+  cwd: string;
+  title: string;
+  activity: string;
+  state: SessionState;
+  tool?: string;
+  startedAt: number;
+  updatedAt: number;
+  hasOutput: boolean;
+  output?: string;
+  outputError?: string;
+  actionError?: string;
 };
 
-export type SessionGroup = {
-  sid: string;
-  agent?: string;
-  project?: string;
-  state?: string;
-  items: FeedItem[];
+export type Permission = {
+  id: string;
+  sessionId: string;
+  agent: string;
+  project: string;
+  cwd: string;
+  summary: string;
+  createdAt: number;
 };
 
-type Me = { paired: boolean; online?: boolean; device?: string; name?: string };
+export type Decision = Permission & { decision: "allow" | "deny" | "expired"; resolvedAt: number };
+
+export type AppStore = {
+  sessions: Record<string, Session>;
+  permissions: Record<string, Permission>;
+  decisions: Decision[];
+  notice?: string;
+};
+
+export type Me = {
+  paired: boolean;
+  online?: boolean;
+  device?: string;
+  name?: string;
+  snapshot_n?: number;
+};
+
+export type Preferences = {
+  providers: Record<string, boolean>;
+  statuses: Record<string, boolean>;
+  directories: string[];
+  notifications: { permissions: boolean; completed: boolean; errors: boolean };
+  confirmStop: boolean;
+  hideCompleted: boolean;
+  showTimes: boolean;
+};
+
+export const emptyStore: AppStore = { sessions: {}, permissions: {}, decisions: [] };
+
+export const defaultPreferences: Preferences = {
+  providers: { opencode: true, codex: true, claude: true },
+  statuses: { running: true, waiting: true, paused: true, completed: true, error: true, stopped: true },
+  directories: [],
+  notifications: { permissions: true, completed: true, errors: true },
+  confirmStop: true,
+  hideCompleted: false,
+  showTimes: true,
+};
 
 export const tg = (globalThis as any).Telegram?.WebApp;
-export const initData = tg?.initData ?? "";
+const queryInitData = new URLSearchParams(location.search).get("init_data") ?? "";
+export const initData = tg?.initData || queryInitData;
 
 export function ready() {
   try {
     tg?.ready();
     tg?.expand();
+    tg?.setHeaderColor?.("#07100b");
+    tg?.setBackgroundColor?.("#07100b");
   } catch {}
-}
-
-export function apiBase(): string {
-  return location.origin;
+	// Query-вариант нужен для локального E2E; после чтения убираем подпись из
+	// адресной строки, чтобы она не попала в referrer/скриншот.
+	if (queryInitData) history.replaceState(null, "", location.pathname + location.hash);
 }
 
 export function wsURL(): string {
@@ -50,7 +99,7 @@ export function wsURL(): string {
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(apiBase() + path, {
+  const res = await fetch(location.origin + path, {
     ...init,
     headers: {
       "Content-Type": "application/json",
@@ -60,104 +109,142 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`HTTP ${res.status}${text ? `: ${text}` : ""}`);
+    throw new Error(text || `HTTP ${res.status}`);
   }
+  if (res.status === 202 || res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
 }
 
-export function me(): Promise<Me> {
-  return api<Me>("/api/me");
-}
+export const me = () => api<Me>("/api/me");
 
-export function pair(code: string): Promise<{ device: string; name: string }> {
-  return api("/api/pair", {
+export const pair = (code: string) =>
+  api<{ device: string; name: string }>("/api/pair", {
     method: "POST",
     body: JSON.stringify({ initData, code }),
   });
+
+export const send = (type: string, body: any = {}) =>
+  api<void>("/api/send", { method: "POST", body: JSON.stringify({ type, body }) });
+
+export const resolvePermission = (id: string, allow: boolean) =>
+  send("permission.resolve", { id, decision: allow ? "allow" : "deny" });
+
+export const sessionCommand = (sessionId: string, action: "pause" | "resume" | "stop" | "output") =>
+  send("session.command", { session_id: sessionId, action });
+
+export const sendPrompt = (session: Pick<Session, "id" | "agent" | "provider" | "cwd">, text: string) =>
+  send("prompt", { agent: session.provider || session.agent, text, session_id: session.id, cwd: session.cwd });
+
+export const syncDevice = () => send("device.sync");
+export const updateDeviceSettings = (preferences: Preferences) =>
+  send("settings.update", { notifications: preferences.notifications });
+export const unpair = () => api<{ ok: boolean }>("/api/unpair", { method: "POST", body: "{}" });
+
+function sessionFromBody(body: any, previous?: Session): Session {
+  const now = Date.now();
+  return {
+    id: body.session_id,
+    agent: body.agent ?? previous?.agent ?? "agent",
+    provider: body.provider ?? previous?.provider ?? normalizeProvider(body.agent),
+    project: body.project ?? previous?.project ?? "",
+    cwd: body.cwd ?? previous?.cwd ?? "",
+    title: body.title ?? previous?.title ?? body.project ?? "Сессия агента",
+    activity: body.activity ?? previous?.activity ?? "Агент работает",
+    state: (body.state ?? previous?.state ?? "running") as SessionState,
+    tool: body.tool ?? previous?.tool,
+    startedAt: Number(body.started_at) || previous?.startedAt || now,
+    updatedAt: Number(body.updated_at) || now,
+    hasOutput: Boolean(body.has_output ?? previous?.hasOutput),
+    output: previous?.output,
+    outputError: previous?.outputError,
+    actionError: previous?.actionError,
+  };
 }
 
-export function send(type: string, body: any): Promise<void> {
-  return api("/api/send", {
-    method: "POST",
-    body: JSON.stringify({ type, body }),
-  });
+function normalizeProvider(agent?: string): string {
+  const value = (agent ?? "").toLowerCase();
+  if (value.includes("open")) return "opencode";
+  if (value.includes("codex")) return "codex";
+  return "claude";
 }
 
-export function resolve(permId: string, allow: boolean): Promise<void> {
-  return send("permission.resolve", { id: permId, decision: allow ? "allow" : "deny" });
+export function applyEnvelope(store: AppStore, env: Envelope): AppStore {
+  const body = env.body ?? {};
+  if (env.type === "notice.clear") return { ...store, notice: undefined };
+  if ((env.type === "session.status" || env.type === "session.finished") && body.session_id) {
+    const next = sessionFromBody(body, store.sessions[body.session_id]);
+    return { ...store, sessions: { ...store.sessions, [next.id]: next } };
+  }
+  if (env.type === "permission.request" && body.id) {
+    const permission: Permission = {
+      id: body.id,
+      sessionId: body.session_id ?? "",
+      agent: body.agent ?? "agent",
+      project: body.project ?? "",
+      cwd: body.cwd ?? "",
+      summary: body.summary ?? "Требуется разрешение",
+      createdAt: Date.now(),
+    };
+    return { ...store, permissions: { ...store.permissions, [permission.id]: permission } };
+  }
+  if (env.type === "permission.resolved" && body.id) {
+    const permission = store.permissions[body.id];
+    const permissions = { ...store.permissions };
+    delete permissions[body.id];
+    const decision: Decision = {
+      id: body.id,
+      sessionId: body.session_id ?? permission?.sessionId ?? "",
+      agent: body.agent ?? permission?.agent ?? "agent",
+      project: permission?.project ?? "",
+      cwd: permission?.cwd ?? "",
+      summary: body.summary ?? permission?.summary ?? "Запрос обработан",
+      createdAt: permission?.createdAt ?? Date.now(),
+      decision: body.decision ?? "expired",
+      resolvedAt: Date.now(),
+    };
+    return { ...store, permissions, decisions: [decision, ...store.decisions].slice(0, 20) };
+  }
+  if (env.type === "session.output" && body.session_id) {
+    const previous = store.sessions[body.session_id];
+    if (!previous) return store;
+    return {
+      ...store,
+      sessions: {
+        ...store.sessions,
+        [previous.id]: { ...previous, output: body.output ?? previous.output, outputError: body.error },
+      },
+    };
+  }
+  if (env.type === "session.action.result" && body.session_id) {
+    const previous = store.sessions[body.session_id];
+    if (!previous) return { ...store, notice: body.error || "Команда выполнена" };
+    return {
+      ...store,
+      notice: body.ok ? undefined : body.error,
+      sessions: { ...store.sessions, [previous.id]: { ...previous, actionError: body.ok ? undefined : body.error } },
+    };
+  }
+  if (env.type === "prompt.rejected") return { ...store, notice: body.reason ?? "Агент отклонил сообщение" };
+  return store;
 }
 
-export function toFeedItem(env: Envelope): FeedItem | null {
-  const b = env.body ?? {};
-  const time = Date.now();
-  switch (env.type) {
-    case "session.status":
-      return {
-        kind: "session",
-        id: b.session_id ?? `s-${time}-${Math.random()}`,
-        time,
-        agent: b.agent,
-        state: b.state,
-        project: b.project,
-        sid: b.session_id,
-      };
-    case "session.finished":
-      return {
-        kind: "session",
-        id: b.session_id ?? `f-${time}-${Math.random()}`,
-        time,
-        agent: b.agent,
-        state: b.state,
-        project: b.project,
-        sid: b.session_id,
-      };
-    case "permission.request":
-      return {
-        kind: "perm",
-        id: `p-${b.id}`,
-        time,
-        agent: b.agent,
-        project: b.project,
-        summary: b.summary,
-        permId: b.id,
-        sid: b.session_id,
-      };
-    case "permission.resolved":
-      return {
-        kind: "info",
-        id: `r-${time}-${Math.random()}`,
-        time,
-        agent: b.agent,
-        state: b.decision,
-        permId: b.id,
-        summary: b.summary,
-        sid: b.id,
-      };
-    case "prompt.accepted":
-      return { kind: "info", id: `pa-${time}-${Math.random()}`, time, agent: b.agent, state: "sent", summary: `принято · ${b.cwd ?? ""}`, sid: b.sid };
-    case "prompt.rejected":
-      return { kind: "info", id: `pr-${time}-${Math.random()}`, time, agent: b.agent, state: "error", summary: b.reason, sid: b.sid };
-    default:
-      return null;
+export function loadPreferences(): Preferences {
+  try {
+    const saved = JSON.parse(localStorage.getItem("cardinal.preferences") || "{}");
+    return {
+      ...defaultPreferences,
+      ...saved,
+      providers: { ...defaultPreferences.providers, ...(saved.providers ?? {}) },
+      statuses: { ...defaultPreferences.statuses, ...(saved.statuses ?? {}) },
+      notifications: { ...defaultPreferences.notifications, ...(saved.notifications ?? {}) },
+    };
+  } catch {
+    return defaultPreferences;
   }
 }
 
-export function groupSessions(feed: FeedItem[]): SessionGroup[] {
-  const map = new Map<string, SessionGroup>();
-  for (const it of feed) {
-    const sid = it.sid ?? it.permId ?? it.id;
-    if (!sid) continue;
-    let g = map.get(sid);
-    if (!g) {
-      g = { sid, agent: it.agent, project: it.project, state: it.state, items: [] };
-      map.set(sid, g);
-    }
-    g.items.push(it);
-    g.state = it.state;
-    g.agent = g.agent ?? it.agent;
-    g.project = g.project ?? it.project;
-  }
-  const list = [...map.values()];
-  list.sort((a, b) => (b.items[0]?.time ?? 0) - (a.items[0]?.time ?? 0));
-  return list;
+export function savePreferences(preferences: Preferences) {
+  try {
+    localStorage.setItem("cardinal.preferences", JSON.stringify(preferences));
+  } catch {}
 }

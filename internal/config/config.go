@@ -33,7 +33,23 @@ type Config struct {
 	RelayURL    string `json:"relay_url,omitempty"`    // базовый URL, например https://cardinal-relay.fly.dev
 	RelayToken  string `json:"relay_token,omitempty"`  // общий секрет RELAY_TOKEN (для повторной регистрации)
 	DeviceToken string `json:"device_token,omitempty"` // персональный токен WS /ws/device
+
+	// Категории Telegram-пушей настраиваются из Mini App. nil сохраняет
+	// обратную совместимость: у старого конфига все важные пуши включены.
+	Notifications *NotificationSettings `json:"notifications,omitempty"`
 }
+
+type NotificationSettings struct {
+	Permissions bool `json:"permissions"`
+	Completed   bool `json:"completed"`
+	Errors      bool `json:"errors"`
+}
+
+func (c *Config) NotifyPermissions() bool {
+	return c.Notifications == nil || c.Notifications.Permissions
+}
+func (c *Config) NotifyCompleted() bool { return c.Notifications == nil || c.Notifications.Completed }
+func (c *Config) NotifyErrors() bool    { return c.Notifications == nil || c.Notifications.Errors }
 
 // Dir — каталог конфига. Переопределяется CARDINAL_HOME.
 func Dir() string {

@@ -35,6 +35,8 @@ const (
 	// device → app (видны в снапшоте Mini App после переподключения)
 	TypeSessionStatus   = "session.status"
 	TypeSessionFinished = "session.finished"
+	TypeSessionOutput   = "session.output"
+	TypeSessionAction   = "session.action.result"
 	TypePermRequest     = "permission.request"
 
 	// device → app (только вживую, в снапшот не попадает)
@@ -44,6 +46,9 @@ const (
 	TypePermResolve = "permission.resolve" // Mini App решает карточку
 	TypePrompt      = "prompt"             // Mini App шлёт промпт агенту (daemon запускает CLI)
 	TypeNotify      = "notify"             // Mini App просит продублировать текст в Telegram
+	TypeSessionCmd  = "session.command"    // pause | resume | stop | output
+	TypeDeviceSync  = "device.sync"        // запросить актуальные состояния daemon'а
+	TypeSettings    = "settings.update"    // настройки Mini App → daemon
 )
 
 const snapshotLimit = 20 // сколько последних статусов видит Mini App на старте
@@ -148,6 +153,20 @@ func (h *Hub) PairByCode(code string, chatID int64) (*Device, bool) {
 	if d == nil {
 		return nil, false
 	}
+	// Одна Mini App ↔ один компьютер. Перепривязка не должна оставлять
+	// старую авторизацию в maps или живой app WebSocket.
+	if d.ChatID != 0 && d.ChatID != chatID {
+		delete(h.chats, d.ChatID)
+	}
+	if oldID, exists := h.chats[chatID]; exists && oldID != d.ID {
+		if old := h.devices[oldID]; old != nil {
+			old.ChatID = 0
+			if old.appConn != nil {
+				_ = old.appConn.c.Close(websocket.StatusNormalClosure, "repaired")
+				old.appConn = nil
+			}
+		}
+	}
 	d.ChatID = chatID
 	h.chats[chatID] = d.ID
 	return d, true
@@ -179,6 +198,55 @@ func snapshotType(t string) bool {
 	return false
 }
 
+// snapshotKey сворачивает поток событий в одно актуальное состояние на
+// сессию/запрос. Mini App получает состояние, а не журнал низкоуровневых
+// событий агента.
+func snapshotKey(env Envelope) string {
+	var body struct {
+		ID        string `json:"id"`
+		SessionID string `json:"session_id"`
+	}
+	if json.Unmarshal(env.Body, &body) != nil {
+		return ""
+	}
+	switch env.Type {
+	case TypeSessionStatus, TypeSessionFinished:
+		if body.SessionID != "" {
+			return "session:" + body.SessionID
+		}
+	case TypePermRequest, TypePermResolved:
+		if body.ID != "" {
+			return "perm:" + body.ID
+		}
+	}
+	return ""
+}
+
+func (h *Hub) updateSnapshotLocked(d *Device, env Envelope) {
+	key := snapshotKey(env)
+	if key == "" {
+		return
+	}
+	for i := range d.Snapshot {
+		if snapshotKey(d.Snapshot[i]) != key {
+			continue
+		}
+		if env.Type == TypePermResolved {
+			d.Snapshot = append(d.Snapshot[:i], d.Snapshot[i+1:]...)
+		} else {
+			d.Snapshot[i] = env
+		}
+		return
+	}
+	if env.Type == TypePermResolved {
+		return
+	}
+	d.Snapshot = append(d.Snapshot, env)
+	if len(d.Snapshot) > snapshotLimit {
+		d.Snapshot = d.Snapshot[len(d.Snapshot)-snapshotLimit:]
+	}
+}
+
 // AttachDeviceWS — daemon подключился по WS. Возвращает writer для исходящих.
 func (h *Hub) AttachDeviceWS(d *Device, c *websocket.Conn, ctx context.Context) {
 	h.mu.Lock()
@@ -203,11 +271,8 @@ func (h *Hub) AttachDeviceWS(d *Device, c *websocket.Conn, ctx context.Context) 
 			continue
 		}
 		h.mu.Lock()
-		if snapshotType(env.Type) {
-			d.Snapshot = append(d.Snapshot, env)
-			if len(d.Snapshot) > snapshotLimit {
-				d.Snapshot = d.Snapshot[len(d.Snapshot)-snapshotLimit:]
-			}
+		if snapshotType(env.Type) || env.Type == TypePermResolved {
+			h.updateSnapshotLocked(d, env)
 		}
 		app := d.appConn
 		h.mu.Unlock()
@@ -273,4 +338,24 @@ func (h *Hub) WriteToDevice(d *Device, env Envelope) bool {
 		return false
 	}
 	return dev.Write(env) == nil
+}
+
+// UnpairByChat отвязывает Mini App от компьютера. Сам daemon остаётся
+// зарегистрирован и может выпустить новый код пары.
+func (h *Hub) UnpairByChat(chatID int64) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	id, ok := h.chats[chatID]
+	if !ok {
+		return false
+	}
+	delete(h.chats, chatID)
+	if d := h.devices[id]; d != nil {
+		d.ChatID = 0
+		if d.appConn != nil {
+			_ = d.appConn.c.Close(websocket.StatusNormalClosure, "unpaired")
+			d.appConn = nil
+		}
+	}
+	return true
 }

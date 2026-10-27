@@ -29,6 +29,7 @@ const usage = `cardinald — daemon Cardinal (https://github.com/GringoCoco/Card
   cardinald pair        привязать бота: спрашивает токен, потом код из твоего чата
   cardinald run         запустить daemon (хуки :9723 + пуши в Telegram)
   cardinald connect URL подключить daemon к relay (Mini App): регистрирует устройство
+  cardinald pair-code   выпустить новый код пары Mini App (10 минут)
   cardinald testevent   отправить тестовое уведомление в Telegram
   cardinald testperm    тест карточки разрешения: жми кнопку — увидишь решение здесь
   cardinald version     версия
@@ -52,8 +53,10 @@ func main() {
 		err = cmdTestPerm()
 	case "connect":
 		err = cmdConnect(os.Args[2:])
+	case "pair-code":
+		err = cmdRelayPairCode()
 	case "version":
-		fmt.Println("cardinald 0.1.0 (фаза 0: хуки → Telegram)")
+		fmt.Println("cardinald 0.2.0 (сессии → Telegram Mini App)")
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:
@@ -63,6 +66,29 @@ func main() {
 	if err != nil {
 		log.Fatalf("ошибка: %v", err)
 	}
+}
+
+func cmdRelayPairCode() error {
+	cfg, err := loadCfg()
+	if err != nil {
+		return err
+	}
+	if cfg.RelayURL == "" || cfg.DeviceToken == "" {
+		return fmt.Errorf("relay не настроен — сначала «cardinald connect URL»")
+	}
+	base, err := url.Parse(strings.TrimRight(cfg.RelayURL, "/"))
+	if err != nil || base.Host == "" {
+		return fmt.Errorf("кривой relay_url в конфиге")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	code, err := pairCode(ctx, base, cfg.DeviceToken)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Код пары для Mini App: %s\n", code)
+	fmt.Println("Код одноразовый и действует 10 минут.")
+	return nil
 }
 
 func loadCfg() (*config.Config, error) {
