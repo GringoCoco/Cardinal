@@ -30,11 +30,38 @@ type Envelope struct {
 	Body json.RawMessage `json:"body,omitempty"`
 }
 
+// Имена конвертов (Envelope.Type).
+const (
+	// device → app (видны в снапшоте Mini App после переподключения)
+	TypeSessionStatus   = "session.status"
+	TypeSessionFinished = "session.finished"
+	TypePermRequest     = "permission.request"
+
+	// device → app (только вживую, в снапшот не попадает)
+	TypePermResolved = "permission.resolved"
+
+	// app → device
+	TypePermResolve = "permission.resolve" // Mini App решает карточку
+	TypeNotify      = "notify"             // Mini App просит продублировать текст в Telegram
+)
+
 const snapshotLimit = 20 // сколько последних статусов видит Mini App на старте
 
 type connWrap struct {
 	c   *websocket.Conn
 	ctx context.Context // cancel при закрытии
+	mu  sync.Mutex      // websocket допускает ровно одного писателя на соединение
+}
+
+// Write — сериализованная запись конверта в соединение.
+func (w *connWrap) Write(env Envelope) error {
+	data, err := json.Marshal(env)
+	if err != nil {
+		return err
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.c.Write(w.ctx, websocket.MessageText, data)
 }
 
 type Device struct {
@@ -145,7 +172,7 @@ func (h *Hub) DeviceByToken(token string) *Device {
 
 func snapshotType(t string) bool {
 	switch t {
-	case "session.status", "session.finished", "permission.request":
+	case TypeSessionStatus, TypeSessionFinished, TypePermRequest:
 		return true
 	}
 	return false
@@ -184,7 +211,7 @@ func (h *Hub) AttachDeviceWS(d *Device, c *websocket.Conn, ctx context.Context) 
 		app := d.appConn
 		h.mu.Unlock()
 		if app != nil {
-			_ = app.c.Write(app.ctx, websocket.MessageText, data)
+			_ = app.Write(env)
 		}
 	}
 }
@@ -195,14 +222,14 @@ func (h *Hub) AttachAppWS(d *Device, c *websocket.Conn, ctx context.Context) {
 	if old := d.appConn; old != nil {
 		_ = old.c.Close(websocket.StatusNormalClosure, "replaced")
 	}
-	d.appConn = &connWrap{c: c, ctx: ctx}
+	app := &connWrap{c: c, ctx: ctx}
+	d.appConn = app
 	snap := append([]Envelope(nil), d.Snapshot...)
 	dev := d.deviceConn
 	h.mu.Unlock()
 
 	for _, env := range snap { // снапшот сразу после подключения
-		data, _ := json.Marshal(env)
-		if err := c.Write(ctx, websocket.MessageText, data); err != nil {
+		if err := app.Write(env); err != nil {
 			return
 		}
 	}
@@ -222,9 +249,8 @@ func (h *Hub) AttachAppWS(d *Device, c *websocket.Conn, ctx context.Context) {
 			continue
 		}
 		env.To = "device"
-		forward, _ := json.Marshal(env)
 		if dev != nil {
-			_ = dev.c.Write(dev.ctx, websocket.MessageText, forward)
+			_ = dev.Write(env)
 		}
 	}
 }
@@ -239,15 +265,11 @@ func (h *Hub) DeviceOnline(d *Device) bool {
 // WriteToDevice — доставить конверт на подключённый daemon (например,
 // промпт из Mini App через POST /api/send). false = daemon не на связи.
 func (h *Hub) WriteToDevice(d *Device, env Envelope) bool {
-	data, err := json.Marshal(env)
-	if err != nil {
-		return false
-	}
 	h.mu.Lock()
 	dev := d.deviceConn
 	h.mu.Unlock()
 	if dev == nil {
 		return false
 	}
-	return dev.c.Write(dev.ctx, websocket.MessageText, data) == nil
+	return dev.Write(env) == nil
 }
